@@ -15,6 +15,13 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from src.features.feature_engineering import (
+    compute_rolling_features,
+    compute_rate_of_change,
+    compute_health_indicator,
+    KEY_SENSORS,
+)
+
 app = FastAPI(
     title="Predictive Maintenance API",
     description="ML-powered equipment failure prediction using IoT sensor data",
@@ -108,21 +115,43 @@ class HealthResponse(BaseModel):
 # --- Helper ---
 
 def sensor_to_array(reading: SensorReading) -> np.ndarray:
-    """Convert sensor reading to feature array. Uses raw sensor values padded to match training features."""
-    values = [
-        reading.temperature, reading.vibration, reading.pressure, reading.rpm,
-        reading.voltage, reading.current, reading.acoustic_emission,
-        reading.oil_temperature, reading.coolant_flow, reading.bearing_frequency,
-        reading.spindle_load, reading.feed_rate, reading.torque, reading.humidity,
-        reading.power_consumption, reading.tool_wear, reading.chip_load,
-        reading.surface_roughness, reading.axis_displacement,
-        reading.motor_current_phase_imbalance,
-    ]
+    """Convert sensor reading to engineered feature array matching training pipeline."""
+    raw_values = {
+        "temperature": reading.temperature, "vibration": reading.vibration,
+        "pressure": reading.pressure, "rpm": reading.rpm,
+        "voltage": reading.voltage, "current": reading.current,
+        "acoustic_emission": reading.acoustic_emission,
+        "oil_temperature": reading.oil_temperature,
+        "coolant_flow": reading.coolant_flow, "bearing_frequency": reading.bearing_frequency,
+        "spindle_load": reading.spindle_load, "feed_rate": reading.feed_rate,
+        "torque": reading.torque, "humidity": reading.humidity,
+        "power_consumption": reading.power_consumption,
+        "tool_wear": reading.tool_wear, "chip_load": reading.chip_load,
+        "surface_roughness": reading.surface_roughness,
+        "axis_displacement": reading.axis_displacement,
+        "motor_current_phase_imbalance": reading.motor_current_phase_imbalance,
+    }
+    # Build a single-row DataFrame with raw sensor columns
+    df = pd.DataFrame([raw_values])
+
+    # Compute engineered features (rolling stats use single-row min_periods=1)
+    rolling_feats = compute_rolling_features(df)
+    rate_feats = compute_rate_of_change(df)
+    hi = compute_health_indicator(df)
+
+    # Merge all features
+    df = pd.concat([df, rolling_feats, rate_feats], axis=1)
+    df["health_indicator"] = hi.values
+
+    # Align to saved training feature columns
     feature_cols = _load_feature_columns()
-    n_features = len(feature_cols) if feature_cols else 20
-    arr = np.zeros(n_features)
-    arr[:min(len(values), n_features)] = values[:n_features]
-    return arr.reshape(1, -1).astype(np.float32)
+    if feature_cols:
+        for col in feature_cols:
+            if col not in df.columns:
+                df[col] = 0.0
+        df = df[feature_cols]
+
+    return df.values.astype(np.float32)
 
 
 # --- Endpoints ---
